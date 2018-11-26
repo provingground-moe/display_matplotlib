@@ -505,6 +505,10 @@ class DisplayImpl(virtualDevice.DisplayImpl):
     def _scale(self, algorithm, minval, maxval, unit, *args, **kwargs):
         """
         Set gray scale
+
+        N.b.  Supports extra arguments:
+        @param maskedPixels  List of names of mask bits to ignore
+                             E.g. ["BAD", "INTERP"].  A single name is also supported
         """
         self._scaleArgs['algorithm'] = algorithm
         self._scaleArgs['minval'] = minval
@@ -520,13 +524,26 @@ class DisplayImpl(virtualDevice.DisplayImpl):
             pass
 
     def _i_scale(self, algorithm, minval, maxval, unit, *args, **kwargs):
+
+        maskedPixels = kwargs.get("maskedPixels", [])
+        if isinstance(maskedPixels, str):
+            maskedPixels = [maskedPixels]
+        bitmask = afwImage.Mask.getPlaneBitMask(maskedPixels)
+
+        sctrl = afwMath.StatisticsControl()
+        sctrl.setAndMask(bitmask)
+
         if minval == "minmax":
             if self._image is None:
                 raise RuntimeError("You may only use minmax if an image is loaded into the display")
 
-            stats = afwMath.makeStatistics(self._image, afwMath.MIN | afwMath.MAX)
+            mi = afwImage.makeMaskedImage(self._image, self._mask)
+            stats = afwMath.makeStatistics(mi, afwMath.MIN | afwMath.MAX, sctrl)
             minval = stats.getValue(afwMath.MIN)
             maxval = stats.getValue(afwMath.MAX)
+        elif minval == "zscale":
+            if bitmask:
+                print("scale(..., 'zscale', maskedPixels=...) is not yet implemented")
 
         if algorithm is None:
             self._normalize = None
