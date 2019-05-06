@@ -35,6 +35,7 @@ import matplotlib.pyplot as pyplot
 import matplotlib.cbook
 import matplotlib.colors as mpColors
 from matplotlib.blocking_input import BlockingInput
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import numpy as np
 import numpy.ma as ma
@@ -116,13 +117,15 @@ class DisplayImpl(virtualDevice.DisplayImpl):
 
         if reopenPlot:
             pyplot.close(display.frame)
-        self._figure = pyplot.figure(display.frame)
+        dpi = kwargs["dpi"] if "dpi" in kwargs else None
+        self._figure = pyplot.figure(display.frame, dpi=dpi)
         self._display = display
         self._maskTransparency = {None : 0.7}  # noqa: ignore=E203
         self._interpretMaskBits = interpretMaskBits  # interpret mask bits in mtv
         self._fastMaskDisplay = fastMaskDisplay
         self._mtvOrigin = mtvOrigin
-        self._mappable = None
+        self._mappable_ax = None
+        self._colorbar_ax = None
         self._image_colormap = pyplot.cm.gray
         #
         self.__alpha = unicodedata.lookup("GREEK SMALL LETTER alpha")  # used in cursor display string
@@ -171,21 +174,77 @@ class DisplayImpl(virtualDevice.DisplayImpl):
     # Extensions to the API
     #
     def savefig(self, *args, **kwargs):
-        """Defer to figure.savefig()"""
+        """Defer to figure.savefig()
+
+        Parameters
+        ----------
+        args : `list`
+          Passed through to figure.savefig()
+        kwargs : `dict`
+          Passed through to figure.savefig()
+        """
         self._figure.savefig(*args, **kwargs)
 
-    def show_colorbar(self, show=True):
-        """Show (or hide) the colour bar"""
+    def show_colorbar(self, show=True, where="right", axSize="5%", axPad=None, **kwargs):
+        """Show (or hide) the colour bar
+
+        Parameters
+        ----------
+        show : `bool`
+          Should I show the colour bar?
+        where : `str`
+          Location of colour bar: "right" or "bottom"
+        axSize : `float` or `str`
+          Size of axes to hold the colour bar; fraction of current x-size
+        axPad : `float` or `str`
+          Padding between axes and colour bar; fraction of current x-size
+        args : `list`
+          Passed through to colorbar()
+        kwargs : `dict`
+          Passed through to colorbar()
+
+        We set the default padding to put the colourbar in a reasonable
+        place for roughly square plots, but you may need to fiddle for
+        plots with extreme axis ratios.
+
+        You can only configure the colorbar when it isn't yet visible, but
+        as you can easily remove it this is not in practice a difficulty.
+        """
         if show:
-            if self._mappable:
-                self._figure.colorbar(self._mappable)
+            if self._mappable_ax:
+                if self._colorbar_ax is None:
+                    orientationDict = dict(right="vertical", bottom="horizontal")
+
+                    mappable, ax = self._mappable_ax
+
+                    if where in orientationDict:
+                        orientation = orientationDict[where]
+                    else:
+                        print(f"Unknown location {where}; " + \
+                              f"please use one of {', '.join(orientationDict.keys())}")
+
+                    if axPad is None:
+                        axPad = 0.1 if orientation == "vertical" else 0.3
+
+                    divider = make_axes_locatable(ax)
+                    self._colorbar_ax = divider.append_axes(where, size=axSize, pad=axPad)
+
+                    self._figure.colorbar(mappable, cax=self._colorbar_ax, orientation=orientation, **kwargs)
+
+                    pyplot.axes(ax)        # make main window active again
+        else:
+            if self._colorbar_ax is not None:
+                self._colorbar_ax.remove()
+                self._colorbar_ax = None
 
     def wait(self, prompt="[c(ontinue) p(db)] :", allowPdb=True):
         """Wait for keyboard input
 
-        @param prompt `str`
+        Parameters
+        ----------
+        prompt : `str`
            The prompt string.
-        @param allowPdb `bool`
+        allowPdb : `bool`
            If true, entering a 'p' or 'pdb' puts you into pdb
 
         Returns the string you entered
@@ -276,7 +335,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
             if isinstance(a, AxesImage):
                 a.get_cursor_data = lambda ev: None  # disabled
 
-        self._figure.tight_layout()
+        #self._figure.tight_layout()     # too tight!  clips axes
         self._figure.canvas.draw_idle()
 
     def _i_mtv(self, data, wcs, title, isMask):
@@ -360,7 +419,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
             else:
                 mappable = ax.imshow(dataArr, origin='lower', interpolation='nearest',
                                      extent=extent, cmap=cmap, norm=norm)
-                self._mappable = mappable
+                self._mappable_ax = (mappable, ax)
 
         self._figure.canvas.draw_idle()
 
@@ -371,7 +430,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
         self._wcs = wcs
         self._xy0 = self._image.getXY0() if self._image else (0, 0)
 
-        self._zoomfac = 1.0
+        self._zoomfac = None
         if self._image is None:
             self._width, self._height = 0, 0
         else:
@@ -577,6 +636,9 @@ class DisplayImpl(virtualDevice.DisplayImpl):
 
         self._zoomfac = zoomfac
 
+        if zoomfac is None:
+            return
+        
         x0, y0 = self._xy0
 
         size = min(self._width, self._height)
@@ -625,7 +687,7 @@ class BlockingKeyInput(BlockingInput):
     Callable class to retrieve a single keyboard click
     """
     def __init__(self, fig):
-        r"""Create a BlockingKeyInput
+        """Create a BlockingKeyInput
 
         \param fig The figure to monitor for keyboard events
         """
@@ -686,13 +748,28 @@ class AsinhNormalize(Normalize):
 
         See Lupton et al., PASP 116, 133
         """
-        Normalize.__init__(self)
-
         # The object used to perform the desired mapping
         self.mapping = afwRgb.AsinhMapping(minimum, dataRange, Q)
 
+        vmin, vmax = self._getMinMaxQ()[0:2]
+        Normalize.__init__(self, vmin, vmax)
 
-class AsinhZScaleNormalize(Normalize):
+    def _getMinMaxQ(self):
+        """Return an asinh mapping's minimum and maximum value, and Q
+
+        Regrettably this information is not preserved by AsinhMapping
+        so we have to reverse engineer it
+        """
+
+        frac = 0.1                      # magic number in AsinhMapping
+        Q = np.sinh((frac*self.mapping._uint8Max)/self.mapping._slope)/frac
+        dataRange = Q/self.mapping._soften
+
+        vmin = self.mapping.minimum[0]
+        return vmin, vmin + dataRange, Q
+
+
+class AsinhZScaleNormalize(AsinhNormalize):
     """Provide an asinh stretch using zscale to set limits for mtv()"""
     def __init__(self, image=None, Q=8):
         """Initialise an object able to carry out an asinh mapping
@@ -702,11 +779,13 @@ class AsinhZScaleNormalize(Normalize):
 
         See Lupton et al., PASP 116, 133
         """
-        Normalize.__init__(self)
 
         # The object used to perform the desired mapping
         self.mapping = afwRgb.AsinhZScaleMapping(image, Q)
 
+        vmin, vmax = self._getMinMaxQ()[0:2]
+        Normalize.__init__(self, vmin, vmax)
+        
 
 class ZScaleNormalize(Normalize):
     """Provide a zscale stretch for mtv()"""
@@ -718,11 +797,11 @@ class ZScaleNormalize(Normalize):
         @param contrast Control the range of pixels to display around the median (default: 0.25)
         """
 
-        Normalize.__init__(self)
-
         # The object used to perform the desired mapping
         self.mapping = afwRgb.ZScaleMapping(image, nSamples, contrast)
 
+        Normalize.__init__(self, self.mapping.minimum[0], self.mapping.maximum)
+        
 
 class LinearNormalize(Normalize):
     """Provide a linear stretch for mtv()"""
@@ -732,8 +811,7 @@ class LinearNormalize(Normalize):
         @param minimum  Minimum value to display
         @param maximum  Maximum value to display
         """
-
-        Normalize.__init__(self)
-
         # The object used to perform the desired mapping
         self.mapping = afwRgb.LinearMapping(minimum, maximum)
+
+        Normalize.__init__(self, self.mapping.minimum[0], self.mapping.maximum)
