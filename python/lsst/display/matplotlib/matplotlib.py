@@ -297,6 +297,8 @@ class DisplayImpl(virtualDevice.DisplayImpl):
         if mask:
             self._i_mtv(mask, wcs, title, True)
 
+        self.show_colorbar()
+        
         if title:
             ax.set_title(title)
 
