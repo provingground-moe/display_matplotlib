@@ -99,7 +99,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
     is given by lsst.display.matplotlib.interactiveBackends
     """
     def __init__(self, display, verbose=False,
-                 interpretMaskBits=True, mtvOrigin=afwImage.PARENT, fastMaskDisplay=True,
+                 interpretMaskBits=True, mtvOrigin=afwImage.PARENT, fastMaskDisplay=False,
                  reopenPlot=False, *args, **kwargs):
         """
         Initialise a matplotlib display
@@ -475,6 +475,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
         # This isn't a great solution.
         #
         self._figure.clf()
+        self._colorbar_ax = None
 
         if self._image:
             zoomfac = self._zoomfac
@@ -482,6 +483,7 @@ class DisplayImpl(virtualDevice.DisplayImpl):
             ycen = self._ycen
 
             self._mtv(self._image, mask=self._mask, wcs=self._wcs, title=self._title)
+            self.show_colorbar()
 
             self._xcen = xcen
             self._ycen = ycen
@@ -754,6 +756,7 @@ class AsinhNormalize(Normalize):
         self.mapping = afwRgb.AsinhMapping(minimum, dataRange, Q)
 
         vmin, vmax = self._getMinMaxQ()[0:2]
+        vmax *= 1 + Q
         Normalize.__init__(self, vmin, vmax)
 
     def _getMinMaxQ(self):
